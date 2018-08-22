@@ -1,9 +1,17 @@
 package com.example.ushnesha.mymoodmusic;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.support.annotation.NonNull;
+import android.support.v4.app.LoaderManager;
 import android.app.ProgressDialog;
 import android.content.ContentProviderOperation;
 import android.content.ContentValues;
+import android.support.v4.content.Loader;
 import android.content.OperationApplicationException;
+import android.database.Cursor;
 import android.media.MediaPlayer;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
@@ -23,6 +31,8 @@ import android.widget.SeekBar;
 import android.widget.Toast;
 
 import com.example.ushnesha.mymoodmusic.Models.SongDetail;
+import com.example.ushnesha.mymoodmusic.data.SongLoader;
+import com.example.ushnesha.mymoodmusic.data.UpdaterService;
 import com.example.ushnesha.mymoodmusic.remote.Config;
 import com.example.ushnesha.mymoodmusic.remote.RemoteEndpointUtil;
 import com.example.ushnesha.mymoodmusic.utils.MusicAdapter;
@@ -34,7 +44,7 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.util.ArrayList;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements LoaderManager.LoaderCallbacks<Cursor> {
 
     public final String TAG=MainActivity.class.getName();
     ArrayList<SongDetail> song_list;
@@ -55,26 +65,134 @@ public class MainActivity extends AppCompatActivity {
 //        SongDetail s=new SongDetail("Sawan Aya Hai", "Arijit Singh", "http://listen.vo.llnwd.net/g3/4/7/5/9/1/1402419574.mp3");
 //        song_list.add(s);
 
-
-        if(isCheckConnection()){
-            new MyAsync().execute();
-        }else{
-            Toast.makeText(this, "No Internet Connection", Toast.LENGTH_SHORT).show();
-        }
+        getSupportLoaderManager().initLoader(0,null,this);
+//        if(isCheckConnection()){
+//            new MyAsync().execute();
+//        }else{
+//            Toast.makeText(this, "No Internet Connection", Toast.LENGTH_SHORT).show();
+//        }
 
         swipeRefreshLayout.setOnRefreshListener(new SwipeRefreshLayout.OnRefreshListener() {
             @Override
             public void onRefresh() {
-                if(isCheckConnection()){
-                    new MyAsync().execute();
-                }else{
-                    Toast.makeText(MainActivity.this, "No Internet Connection", Toast.LENGTH_SHORT).show();
-                }
-
-                swipeRefreshLayout.setRefreshing(false);
+//                if(isCheckConnection()){
+//                    new MyAsync().execute();
+//                }else{
+//                    Toast.makeText(MainActivity.this, "No Internet Connection", Toast.LENGTH_SHORT).show();
+//                }
+//
+//                swipeRefreshLayout.setRefreshing(false);
+                refresh();
+                updateRefreshingUI();
             }
         });
 
+
+        if(savedInstanceState == null){
+            refresh();
+        }
+
+    }
+
+    private void refresh(){
+        startService(new Intent(this, UpdaterService.class));
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        registerReceiver(mRefreshingReceiver, new IntentFilter(UpdaterService.BROADCAST_ACTION_STATE_CHANGE));
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        unregisterReceiver(mRefreshingReceiver);
+    }
+
+    private boolean mIsRefreshing=false;
+
+    private BroadcastReceiver mRefreshingReceiver=new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if(UpdaterService.BROADCAST_ACTION_STATE_CHANGE.equals(intent.getAction())){
+                mIsRefreshing=intent.getBooleanExtra(UpdaterService.EXTRA_REFRESHING,false);
+                updateRefreshingUI();
+            }
+        }
+    };
+
+    private void updateRefreshingUI(){
+        swipeRefreshLayout.setRefreshing(mIsRefreshing);
+    }
+
+    @NonNull
+    @Override
+    public Loader<Cursor> onCreateLoader(int id, Bundle args) {
+        return SongLoader.newAllSongInstance(this);
+    }
+
+    @Override
+    public void onLoadFinished(@NonNull Loader<Cursor> loader, Cursor data) {
+        musicAdapter=new MusicAdapter(MainActivity.this, data);
+        LinearLayoutManager linearLayoutManager = new LinearLayoutManager(MainActivity.this);
+        DividerItemDecoration dividerItemDecoration=new DividerItemDecoration(recyclerView.getContext(), linearLayoutManager.getOrientation() );
+        recyclerView.addItemDecoration(dividerItemDecoration);
+        recyclerView.setLayoutManager(linearLayoutManager);
+        recyclerView.setAdapter(musicAdapter);
+
+        musicAdapter.setOnitemClickListener(new MusicAdapter.OnitemClickListener() {
+            @Override
+            public void onItemClick(final Button b, View v, final SongDetail obj, int pos) {
+                if(RemoteEndpointUtil.isCheckConnection(MainActivity.this)){
+                    if (b.getText().toString().equals("Stop")) {
+                        mediaPlayer.stop();
+                        mediaPlayer.reset();
+                        mediaPlayer.release();
+                        mediaPlayer = null;
+                        b.setText("Play");
+                    } else {
+                        Runnable r = new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    ProgressDialog progressDialog = null;
+                                    progressDialog = ProgressDialog.show(MainActivity.this, "", "Playing...");
+                                    mediaPlayer = new MediaPlayer();
+                                    mediaPlayer.setDataSource(obj.getSongUrl());
+                                    mediaPlayer.prepareAsync();
+                                    final ProgressDialog finalProgressDialog = progressDialog;
+                                    mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                                        @Override
+                                        public void onPrepared(MediaPlayer mp) {
+                                            finalProgressDialog.cancel();
+                                            mp.start();
+                                            seekBar.setProgress(0);
+                                            seekBar.setMax(mp.getDuration());
+                                        }
+                                    });
+                                    b.setText("Stop");
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
+                            }
+                        };
+                        handler.postDelayed(r, 100);
+                    }
+                }else{
+                    Toast.makeText(MainActivity.this, "No Internet Connection", Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+
+        Thread t = new MyThread();
+        t.start();
+
+    }
+
+    @Override
+    public void onLoaderReset(Loader<Cursor> loader) {
+        recyclerView.setAdapter(null);
     }
 
     public class MyThread extends Thread{
@@ -114,141 +232,141 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void fillArrayList(){
-
-        try {
-            JSONArray array = RemoteEndpointUtil.fetchJsonArray();
-            if (array == null) {
-                throw new JSONException("Invalid parsed item array");
-            }
-
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject object = array.getJSONObject(i);
-                String playbackSecs = object.getString("playbackSeconds");
-                String songName = object.getString("name");
-                String artistName = object.getString("artistName");
-                String albumName = object.getString("albumName");
-                String songUrl = object.getString("previewURL");
-                SongDetail sd = new SongDetail(songName, artistName, songUrl, albumName, playbackSecs);
-                song_list.add(sd);
-
-
-            }
-        }catch (JSONException e) {
-            Log.e(TAG, "Error updating content.", e);
-        }
-
-    }
-
-
-    private boolean isCheckConnection(){
-        boolean ch=false;
-        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        if(cm != null) {
-            NetworkInfo ni = cm.getActiveNetworkInfo();
-            if (ni == null || !ni.isConnected()) {
-                Log.e(TAG, "Not online, not refreshing.");
-                ch=false;
-            }else{
-                ch=true;
-            }
-        }else{
-            Log.e(TAG, "cm is null");
-            ch=false;
-        }
-        return ch;
-    }
+//    private void fillArrayList(){
+//
+//        try {
+//            JSONArray array = RemoteEndpointUtil.fetchJsonArray();
+//            if (array == null) {
+//                throw new JSONException("Invalid parsed item array");
+//            }
+//
+//            for (int i = 0; i < array.length(); i++) {
+//                JSONObject object = array.getJSONObject(i);
+//                String playbackSecs = object.getString("playbackSeconds");
+//                String songName = object.getString("name");
+//                String artistName = object.getString("artistName");
+//                String albumName = object.getString("albumName");
+//                String songUrl = object.getString("previewURL");
+//                SongDetail sd = new SongDetail(songName, artistName, songUrl, albumName, playbackSecs);
+//                song_list.add(sd);
+//
+//
+//            }
+//        }catch (JSONException e) {
+//            Log.e(TAG, "Error updating content.", e);
+//        }
+//
+//    }
 
 
-    public class MyAsync extends AsyncTask<Void,Void,JSONArray>{
+//    private boolean isCheckConnection(){
+//        boolean ch=false;
+//        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+//        if(cm != null) {
+//            NetworkInfo ni = cm.getActiveNetworkInfo();
+//            if (ni == null || !ni.isConnected()) {
+//                Log.e(TAG, "Not online, not refreshing.");
+//                ch=false;
+//            }else{
+//                ch=true;
+//            }
+//        }else{
+//            Log.e(TAG, "cm is null");
+//            ch=false;
+//        }
+//        return ch;
+//    }
 
 
-        @Override
-        protected JSONArray doInBackground(Void... voids) {
-            JSONArray jsonString=null;
-            jsonString=RemoteEndpointUtil.fetchJsonArray();
-            return jsonString;
-        }
-
-        @Override
-        protected void onPostExecute(JSONArray arr) {
-
-            try {
-//                JSONObject obj=new JSONObject(s);
-
-                song_list=new ArrayList<SongDetail>();
-                if(arr != null) {
-                    for (int i = 0; i < arr.length(); i++) {
-                        JSONObject a = arr.getJSONObject(i);
-                        String playbackSec = a.getString("playbackSeconds");
-                        String songName = a.getString("name");
-                        String artistName = a.getString("artistName");
-                        String albumName = a.getString("albumName");
-                        String songUrl = a.getString("previewURL");
-                        Log.e(TAG, playbackSec + ' ' + songName + ' ' + artistName + ' ' + albumName + ' ' + songUrl);
-                        SongDetail sd = new SongDetail(songName, artistName, songUrl, albumName, playbackSec);
-                        song_list.add(sd);
-                    }
-                }else{
-                    Log.e(TAG,"JSONArray is null");
-                }
-            } catch (JSONException e) {
-                e.printStackTrace();
-            }
-            musicAdapter=new MusicAdapter(MainActivity.this, song_list);
-            LinearLayoutManager linearLayoutManager = new LinearLayoutManager(MainActivity.this);
-            DividerItemDecoration dividerItemDecoration=new DividerItemDecoration(recyclerView.getContext(), linearLayoutManager.getOrientation() );
-            recyclerView.addItemDecoration(dividerItemDecoration);
-            recyclerView.setLayoutManager(linearLayoutManager);
-            recyclerView.setAdapter(musicAdapter);
-
-
-            musicAdapter.setOnitemClickListener(new MusicAdapter.OnitemClickListener() {
-                @Override
-                public void onItemClick(final Button b, View v, final SongDetail obj, int pos) {
-                    if (b.getText().toString().equals("Stop")) {
-                        mediaPlayer.stop();
-                        mediaPlayer.reset();
-                        mediaPlayer.release();
-                        mediaPlayer = null;
-                        b.setText("Play");
-                    } else {
-                        Runnable r = new Runnable() {
-                            @Override
-                            public void run() {
-                                try {
-                                    ProgressDialog progressDialog = null;
-                                    progressDialog = ProgressDialog.show(MainActivity.this, "", "Playing...");
-                                    mediaPlayer = new MediaPlayer();
-                                    mediaPlayer.setDataSource(obj.getSongUrl());
-                                    mediaPlayer.prepareAsync();
-                                    final ProgressDialog finalProgressDialog = progressDialog;
-                                    mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
-                                        @Override
-                                        public void onPrepared(MediaPlayer mp) {
-                                            finalProgressDialog.cancel();
-                                            mp.start();
-                                            seekBar.setProgress(0);
-                                            seekBar.setMax(mp.getDuration());
-                                        }
-                                    });
-                                    b.setText("Stop");
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                        };
-                        handler.postDelayed(r, 100);
-                    }
-
-                }
-            });
-
-            Thread t = new MyThread();
-            t.start();
-
-        }
-    }
+//    public class MyAsync extends AsyncTask<Void,Void,JSONArray>{
+//
+//
+//        @Override
+//        protected JSONArray doInBackground(Void... voids) {
+//            JSONArray jsonString=null;
+//            jsonString=RemoteEndpointUtil.fetchJsonArray();
+//            return jsonString;
+//        }
+//
+//        @Override
+//        protected void onPostExecute(JSONArray arr) {
+//
+//            try {
+////                JSONObject obj=new JSONObject(s);
+//
+//                song_list=new ArrayList<SongDetail>();
+//                if(arr != null) {
+//                    for (int i = 0; i < arr.length(); i++) {
+//                        JSONObject a = arr.getJSONObject(i);
+//                        String playbackSec = a.getString("playbackSeconds");
+//                        String songName = a.getString("name");
+//                        String artistName = a.getString("artistName");
+//                        String albumName = a.getString("albumName");
+//                        String songUrl = a.getString("previewURL");
+//                        Log.e(TAG, playbackSec + ' ' + songName + ' ' + artistName + ' ' + albumName + ' ' + songUrl);
+//                        SongDetail sd = new SongDetail(songName, artistName, songUrl, albumName, playbackSec);
+//                        song_list.add(sd);
+//                    }
+//                }else{
+//                    Log.e(TAG,"JSONArray is null");
+//                }
+//            } catch (JSONException e) {
+//                e.printStackTrace();
+//            }
+//            musicAdapter=new MusicAdapter(MainActivity.this, );
+//            LinearLayoutManager linearLayoutManager = new LinearLayoutManager(MainActivity.this);
+//            DividerItemDecoration dividerItemDecoration=new DividerItemDecoration(recyclerView.getContext(), linearLayoutManager.getOrientation() );
+//            recyclerView.addItemDecoration(dividerItemDecoration);
+//            recyclerView.setLayoutManager(linearLayoutManager);
+//            recyclerView.setAdapter(musicAdapter);
+//
+//
+//            musicAdapter.setOnitemClickListener(new MusicAdapter.OnitemClickListener() {
+//                @Override
+//                public void onItemClick(final Button b, View v, final SongDetail obj, int pos) {
+//                    if (b.getText().toString().equals("Stop")) {
+//                        mediaPlayer.stop();
+//                        mediaPlayer.reset();
+//                        mediaPlayer.release();
+//                        mediaPlayer = null;
+//                        b.setText("Play");
+//                    } else {
+//                        Runnable r = new Runnable() {
+//                            @Override
+//                            public void run() {
+//                                try {
+//                                    ProgressDialog progressDialog = null;
+//                                    progressDialog = ProgressDialog.show(MainActivity.this, "", "Playing...");
+//                                    mediaPlayer = new MediaPlayer();
+//                                    mediaPlayer.setDataSource(obj.getSongUrl());
+//                                    mediaPlayer.prepareAsync();
+//                                    final ProgressDialog finalProgressDialog = progressDialog;
+//                                    mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+//                                        @Override
+//                                        public void onPrepared(MediaPlayer mp) {
+//                                            finalProgressDialog.cancel();
+//                                            mp.start();
+//                                            seekBar.setProgress(0);
+//                                            seekBar.setMax(mp.getDuration());
+//                                        }
+//                                    });
+//                                    b.setText("Stop");
+//                                } catch (IOException e) {
+//                                    e.printStackTrace();
+//                                }
+//                            }
+//                        };
+//                        handler.postDelayed(r, 100);
+//                    }
+//
+//                }
+//            });
+//
+//            Thread t = new MyThread();
+//            t.start();
+//
+//        }
+//    }
 
 
 }
